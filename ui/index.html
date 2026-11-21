@@ -1763,5 +1763,64 @@ $('#mascotToggle').onclick=()=>setShown(!shown);setShown(shown);
 setView(location.hash.slice(1)||'chat');
 })();
 </script>
+<!-- =================== ABOUT YOU (fork addition, kept in this one block so upstream updates merge cleanly)
+     A note the user writes in Settings, sent as the system message at the start of every chat request.
+     Self-contained: it reads the language from <html lang>, adds its own card to Settings, and wraps
+     fetch() so /v1/chat/completions requests carry the note. Stored only in this browser. -->
+<script>
+(function(){
+  const KEY='colibri.local.about';
+  const T={
+    it:{title:'Su di te',sub:"Inviato al modello all'inizio di ogni chat, così sa chi sei e come preferisci le risposte. Resta solo in questo browser.",label:'Cosa deve sapere il modello di te?',hint:"meglio breve: viene letto all'inizio di ogni chat",ph:'Sono un designer di prodotto. Risposte brevi e pratiche, con unità metriche.',use:'Usalo nelle chat'},
+    en:{title:'About you',sub:'Sent to the model at the start of every chat, so it knows who you are and how you like answers. Kept only in this browser.',label:'What should the model know about you?',hint:'short is best: it is read at the start of every chat',ph:"I'm a product designer. Keep answers short and practical, and use metric units.",use:'Use it in chats'},
+    de:{title:'Über dich',sub:'Wird zu Beginn jedes Chats an das Modell gesendet, damit es weiß, wer du bist und wie du Antworten magst. Bleibt nur in diesem Browser.',label:'Was soll das Modell über dich wissen?',hint:'kurz ist am besten: es wird zu Beginn jedes Chats gelesen',ph:'Ich bin Produktdesigner. Antworte kurz und praktisch, mit metrischen Einheiten.',use:'In Chats verwenden'},
+    'pt-BR':{title:'Sobre você',sub:'Enviado ao modelo no início de cada chat, para que ele saiba quem você é e como prefere as respostas. Fica só neste navegador.',label:'O que o modelo deve saber sobre você?',hint:'curto é melhor: é lido no início de cada chat',ph:'Sou designer de produto. Respostas curtas e práticas, em unidades métricas.',use:'Usar nos chats'},
+    id:{title:'Tentang Anda',sub:'Dikirim ke model di awal setiap obrolan, agar model tahu siapa Anda dan jawaban seperti apa yang Anda suka. Hanya disimpan di browser ini.',label:'Apa yang perlu diketahui model tentang Anda?',hint:'lebih singkat lebih baik: dibaca di awal setiap obrolan',ph:'Saya desainer produk. Jawab singkat dan praktis, pakai satuan metrik.',use:'Gunakan dalam obrolan'},
+    'zh-CN':{title:'关于你',sub:'每次对话开始时发送给模型，让它了解你是谁、你喜欢怎样的回答。只保存在此浏览器中。',label:'模型应该了解你哪些情况？',hint:'越短越好：每次对话开始时都会读取',ph:'我是一名产品设计师。回答请简短实用，使用公制单位。',use:'在对话中使用'},
+    'zh-TW':{title:'關於你',sub:'每次對話開始時傳送給模型，讓它了解你是誰、你喜歡怎樣的回答。只保存在此瀏覽器中。',label:'模型應該了解你哪些情況？',hint:'越短越好：每次對話開始時都會讀取',ph:'我是一名產品設計師。回答請簡短實用，使用公制單位。',use:'在對話中使用'}
+  };
+  const PREFIX='[From the user\'s settings] Below is a note the user wrote about themselves and how they like answers. Use it to tailor your replies; do not bring it up unless it is relevant.\n\n---\n';
+  const read=()=>{try{const v=JSON.parse(localStorage.getItem(KEY));if(v&&typeof v.text==='string')return{text:v.text,on:v.on!==false}}catch(e){}return{text:'',on:true}};
+  const write=v=>{try{localStorage.setItem(KEY,JSON.stringify(v))}catch(e){}};
+  const lang=()=>{const l=document.documentElement.lang||'en';return T[l]?l:(T[l.split('-')[0]]?l.split('-')[0]:'en')};
+
+  /* every chat request carries the note as (the start of) its system message */
+  const origFetch=window.fetch.bind(window);
+  window.fetch=function(input,init){
+    try{
+      const u=typeof input==='string'?input:(input&&input.url)||'';
+      const s=read(),t=s.on&&s.text.trim();
+      if(t&&init&&typeof init.body==='string'&&/\/v1\/chat\/completions(\?|$)/.test(u)){
+        const b=JSON.parse(init.body);
+        if(Array.isArray(b.messages)){
+          const note=PREFIX+t,m0=b.messages[0];
+          if(m0&&m0.role==='system'&&typeof m0.content==='string')m0.content=note+'\n\n'+m0.content;
+          else b.messages.unshift({role:'system',content:note});
+          init=Object.assign({},init,{body:JSON.stringify(b)});
+        }
+      }
+    }catch(e){}
+    return origFetch(input,init);
+  };
+
+  /* the Settings card, right after "General" */
+  const gen=document.getElementById('st-gen');if(!gen)return;
+  const card=document.createElement('div');card.className='card form';card.id='st-about';card.setAttribute('data-noi18n','');
+  card.innerHTML='<h2 class="h2" data-k="title"></h2><p class="sub" style="margin:0" data-k="sub"></p>'
+    +'<div class="field"><span><span data-k="label"></span><small data-k="hint"></small></span><textarea class="area" id="aboutText" rows="5"></textarea></div>'
+    +'<div class="row"><span style="font-size:13px;font-weight:700;color:var(--ink-soft)" data-k="use"></span><span class="spacer"></span><button class="toggle" id="aboutToggle" role="switch"></button></div>';
+  gen.after(card);
+  const navGen=document.querySelector('.settings-nav a[href="#st-gen"]');
+  if(navGen){const a=document.createElement('a');a.href='#st-about';a.setAttribute('data-noi18n','');a.dataset.k='title';
+    a.onclick=e=>{e.preventDefault();card.scrollIntoView({behavior:'smooth',block:'start'})};navGen.after(a)}
+  const ta=card.querySelector('#aboutText'),tg=card.querySelector('#aboutToggle');
+  const s=read();ta.value=s.text;tg.setAttribute('aria-checked',String(s.on));
+  ta.addEventListener('input',()=>{const v=read();v.text=ta.value;write(v)});
+  tg.onclick=()=>{const v=read();v.on=!v.on;write(v);tg.setAttribute('aria-checked',String(v.on))};
+  const paint=()=>{const d=T[lang()];document.querySelectorAll('#st-about [data-k],.settings-nav a[data-k]').forEach(n=>{n.textContent=d[n.dataset.k]});
+    ta.placeholder=d.ph;tg.setAttribute('aria-label',d.use)};
+  paint();new MutationObserver(paint).observe(document.documentElement,{attributes:true,attributeFilter:['lang']});
+})();
+</script>
 </body>
 </html>
