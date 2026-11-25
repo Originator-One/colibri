@@ -1217,7 +1217,7 @@ let WEBOK=false,CITE=null;const WEB_ROUNDS=3;
 const WEB_TOOLS=[{type:'function',function:{name:'cerca',description:'Cerca sul web. Usalo per fatti recenti, notizie, prezzi, versioni, date, o quando non sei sicuro di una cosa. Restituisce risultati numerati con titolo, link ed estratto.',parameters:{type:'object',properties:{query:{type:'string',description:'la ricerca: poche parole, nella lingua più adatta'}},required:['query']}}},
   {type:'function',function:{name:'apri',description:"Legge il testo di una pagina web (tagliato a qualche migliaio di caratteri). Usalo su un link dei risultati quando l'estratto non basta.",parameters:{type:'object',properties:{url:{type:'string',description:'il link da leggere'}},required:['url']}}}];
 const webSystem=()=>`Oggi è ${new Date().toLocaleDateString(LOC,{weekday:'long',day:'numeric',month:'long',year:'numeric'})}. Hai due strumenti: cerca (una ricerca sul web) e apri (legge una pagina). Usali quando la domanda riguarda fatti recenti o cose che non sai con certezza; per il resto rispondi direttamente. Quando usi quello che hai trovato, cita la fonte con il suo numero tra parentesi quadre, per esempio [1] o [2]. Rispondi nella lingua dell'utente.`;
-const host=u=>{try{return new URL(u).hostname.replace(/^www\./,'')}catch(e){return ''}};
+const host=u=>{try{const x=new URL(u);return x.protocol==='obsidian:'?'Obsidian':x.hostname.replace(/^www\./,'')}catch(e){return ''}};
 async function runWebTool(c,a,signal){let args={};try{args=JSON.parse(c.args||'{}')}catch(e){}
   const step={kind:c.name==='apri'?'open':'search',q:String(args.query||args.q||''),url:String(args.url||''),state:'run',results:[]};a.steps.push(step);
   const cite=(u,title)=>{let n=a.sources.findIndex(x=>x.url===u)+1;if(!n){a.sources.push({url:u,title:title||u});n=a.sources.length}return n};
@@ -1231,7 +1231,8 @@ async function runWebTool(c,a,signal){let args={};try{args=JSON.parse(c.args||'{
     return `[${n}] ${d.title||''}\n${d.url}\n\n${d.text}${d.truncated?'\n[testo tagliato]':''}`}
   catch(e){if(signal.aborted)throw e;step.state='err';step.err=String(e.message||e);return `Errore: ${step.err}`}}
 function stepsHTML(a){if(!a.steps||!a.steps.length)return '';
-  return `<div class="wsteps">${a.steps.map(s=>`<div class="wstep is-${s.state}"><svg class="ic ic--sm"><use href="#${s.kind==='open'?'i-link':'i-search'}"/></svg><span>${s.kind==='open'?'Legge':'Cerca'} <b>${esc(s.kind==='open'?(s.title||host(s.url)||s.url):s.q)}</b></span><small>${s.state==='run'?'<span class="dots"><i></i><i></i><i></i></span>':s.state==='err'?esc(s.err):s.kind==='search'?`${s.results.length} risultati`:`[${s.results[0]}]`}</small></div>`).join('')}</div>`}
+  /* fork: the second brain's steps (nsearch, nread) carry their own label */
+  return `<div class="wsteps">${a.steps.map(s=>{const rd=s.kind==='open'||s.kind==='nread';return `<div class="wstep is-${s.state}"><svg class="ic ic--sm"><use href="#${s.kind==='nread'?'i-file':rd?'i-link':'i-search'}"/></svg><span>${esc(s.label||(rd?'Legge':'Cerca'))} <b>${esc(rd?(s.title||host(s.url)||s.url):s.q)}</b></span><small>${s.state==='run'?'<span class="dots"><i></i><i></i><i></i></span>':s.state==='err'?esc(s.err):!rd?`${s.results.length} risultati`:`[${s.results[0]}]`}</small></div>`}).join('')}</div>`}
 function sourcesHTML(a){if(!a.sources||!a.sources.length)return '';
   return `<details class="wsrc"><summary><svg class="ic ic--sm"><use href="#i-link"/></svg>Fonti · ${a.sources.length}<svg class="ic ic--sm chev"><use href="#i-chev"/></svg></summary><ol>${a.sources.map(x=>`<li><a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.title||x.url)}</a><small>${esc(host(x.url))}</small></li>`).join('')}</ol></details>`}
 /* [1] or [1, 3] in the answer: a link to that source, when the turn has sources */
@@ -1369,12 +1370,15 @@ async function generate(cont){
      as its result instead. Not on a continued turn. */
   const webOn=!!(ST.web&&WEBOK&&!cont);const msgs=hist.map(apiMsg);
   if(webOn){msgs.unshift({role:'system',content:webSystem()});a.steps=[];a.sources=[]}
+  /* fork: the second brain's note tools (the SECOND BRAIN block at the end of the page) */
+  const brainOn=!!(window.BRAIN&&BRAIN.on()&&!cont);
+  if(brainOn){if(webOn)msgs[0].content+='\n\n'+BRAIN.system();else{msgs.unshift({role:'system',content:BRAIN.system()});a.steps=[];a.sources=[]}}
   const body={model,messages:msgs,temperature:ST.temp,enable_thinking:!!ST.reason,stream:true,stream_options:{include_usage:true}};
   if(ST.maxTok)body.max_completion_tokens=ST.maxTok;
   if(HEALTH&&HEALTH.kv_slots>1)body.cache_slot=ST.slot;if(HEALTH&&HEALTH.context_compaction)body.context_compaction='auto';
   let outTot=0,sawUsage=false;
   try{for(let round=0;;round++){
-    const useTools=webOn;if(useTools){body.tools=WEB_TOOLS;body.tool_choice='auto'}
+    const useTools=webOn||brainOn;if(useTools){body.tools=[...(webOn?WEB_TOOLS:[]),...(brainOn?BRAIN.tools:[])];body.tool_choice='auto'}
     const calls=[];let roundText='',roundReason='';finish=null;usage=null;
     if(round&&a.reasoning&&!a.reasoning.endsWith('\n\n'))a.reasoning+='\n\n';
     const r=await fetch(url('/v1/chat/completions'),{method:'POST',headers:H(),body:JSON.stringify(body),signal:ctl.signal});
@@ -1397,8 +1401,9 @@ async function generate(cont){
     if(!(useTools&&live.length)||round>=WEB_ROUNDS+1)break;
     /* the round as the model wrote it (so the server's saved state still matches), then the results */
     msgs.push({role:'assistant',content:roundText,...(roundReason.trim()?{reasoning_content:roundReason}:{}),tool_calls:live.map((c,i)=>({id:c.id||`call_${round}_${i}`,type:'function',function:{name:c.name,arguments:c.args||'{}'}}))});
-    phase='tool';setPill('tool','Cerca sul web');if(M.token===t)setAnim('read');
-    for(const [i,c] of live.entries()){const res=round<WEB_ROUNDS?await runWebTool(c,a,ctl.signal):'Limite di ricerche raggiunto per questa risposta: rispondi ora con quello che hai trovato, citando le fonti.';repaint();msgs.push({role:'tool',tool_call_id:c.id||`call_${round}_${i}`,name:c.name,content:res})}
+    phase='tool';setPill('tool',brainOn&&live.every(c=>BRAIN.owns(c.name))?BRAIN.pill():'Cerca sul web');if(M.token===t)setAnim('read');
+    /* fork: a note call goes to the second brain; once an answer has read a note it gets no web search, so nothing from the notes goes out in a query */
+    for(const [i,c] of live.entries()){const res=round<WEB_ROUNDS?(brainOn&&BRAIN.owns(c.name)?await BRAIN.run(c,a,ctl.signal):webOn&&!(brainOn&&BRAIN.used(a))?await runWebTool(c,a,ctl.signal):BRAIN.refuse(c,webOn)):'Limite di ricerche raggiunto per questa risposta: rispondi ora con quello che hai trovato, citando le fonti.';repaint();msgs.push({role:'tool',tool_call_id:c.id||`call_${round}_${i}`,name:c.name,content:res})}
     if(a.content&&!a.content.endsWith('\n'))a.content+='\n\n';
     phase='reading';setPill('reading','Legge i risultati');repaint()}
     a.finish=finish||'incomplete';
@@ -1820,6 +1825,80 @@ setView(location.hash.slice(1)||'chat');
   const paint=()=>{const d=T[lang()];document.querySelectorAll('#st-about [data-k],.settings-nav a[data-k]').forEach(n=>{n.textContent=d[n.dataset.k]});
     ta.placeholder=d.ph;tg.setAttribute('aria-label',d.use)};
   paint();new MutationObserver(paint).observe(document.documentElement,{attributes:true,attributeFilter:['lang']});
+})();
+</script>
+<!-- =================== SECOND BRAIN (fork addition, kept in this one block so upstream updates merge cleanly;
+     generate() and stepsHTML() reach it through a few lines marked "fork: the second brain")
+     The chat's note tools, note_search and note_read, run against /brain/* (ui/server.py and
+     ui/brain.py), which search and read the Markdown notes in the folder `coli ui --brain` names,
+     such as an Obsidian vault. On when the server has a folder, with a switch in the + menu and
+     a chip under the box, like web search. Kept short on purpose: the tools sit at the top of
+     every prompt and every line they return is read by the engine, so a search shows three
+     notes with two lines each and a read stops at about 1,800 characters. An answer that has
+     read a note gets no web search after it, so nothing from the notes leaves in a query.
+     A note it cites links to obsidian://, which opens the note in Obsidian. -->
+<script>
+/* the page's own code sits inside one function, so this block keeps to what it can see from
+   outside: the DOM, localStorage and fetch on this server's own /brain/ paths */
+window.BRAIN=(function(){
+  const KEY='colibri.local.brain';
+  const T={
+    it:{menu:'Le mie note',on:'Acceso',off:'Spento',tip:'La chat può cercare nelle tue note: clic per spegnerla',search:'Cerca nelle note',read:'Legge la nota',pill:'Cerca nelle note'},
+    en:{menu:'My notes',on:'On',off:'Off',tip:'The chat can search your notes: click to turn it off',search:'Searches notes for',read:'Reads',pill:'Searching your notes'}
+  };
+  const lang=()=>{const l=(document.documentElement.lang||'en').split('-')[0];return T[l]?l:'en'};
+  const tx=k=>T[lang()][k];
+  let pref={on:true};try{const v=JSON.parse(localStorage.getItem(KEY));if(v&&typeof v.on==='boolean')pref=v}catch(e){}
+  const save=()=>{try{localStorage.setItem(KEY,JSON.stringify(pref))}catch(e){}};
+  let S=null;                       /* /brain/status: {on, vault, notes} */
+  const read=new WeakSet();          /* the answers that have read a note */
+
+  const tools=[
+    {type:'function',function:{name:'note_search',description:"Search the user's own notes (their life, work, people, money, health and plans). Returns the best notes, numbered, with a line or two from each.",parameters:{type:'object',properties:{query:{type:'string',description:'a few keywords'}},required:['query']}}},
+    {type:'function',function:{name:'note_read',description:'Read one of those notes by name, or with find only its lines about something. Use it when the search lines are not enough.',parameters:{type:'object',properties:{note:{type:'string',description:'the note name from note_search'},find:{type:'string',description:'optional keywords for the part you need'}},required:['note']}}}];
+  const system=()=>"You can look things up in the user's own notes with note_search and note_read. Use them when a question is about the user or their family, work, people, money, health or plans, and answer from what the notes say. Search first, and read a note only when the lines found are not enough, because every note you read takes time. If the notes don't say, say so rather than guess. Cite a note by its number in square brackets, like [1].";
+  const link=p=>'obsidian://open?vault='+encodeURIComponent(S&&S.vault||'')+'&file='+encodeURIComponent(p.replace(/\.md$/,''));
+
+  async function run(c,a,signal){let args={};try{args=JSON.parse(c.args||'{}')}catch(e){}
+    const rd=c.name==='note_read',find=String(args.find||'').trim();
+    const step={kind:rd?'nread':'nsearch',label:tx(rd?'read':'search'),q:String(args.query||args.q||''),title:String(args.note||''),state:'run',results:[]};a.steps.push(step);
+    const cite=(path,title)=>{const u=link(path);let n=a.sources.findIndex(x=>x.url===u)+1;if(!n){a.sources.push({url:u,title});n=a.sources.length}return n};
+    try{
+      if(!rd){if(!step.q)throw new Error('empty search');
+        const r=await fetch('/brain/search?n=3&q='+encodeURIComponent(step.q),{signal});const d=await r.json();if(!r.ok)throw new Error(d.error||r.status);
+        read.add(a);
+        const hits=d.results.map(x=>{const n=cite(x.path,x.note);step.results.push(n);return `[${n}] ${x.note}\n${x.lines.join('\n')}`});
+        step.state='ok';
+        return hits.length?`Notes for "${step.q}":\n\n${hits.join('\n\n')}`:`No note matches "${step.q}". Try other words, or tell the user the notes don't cover it.`}
+      if(!step.title)throw new Error('no note named');
+      const r=await fetch('/brain/read?note='+encodeURIComponent(step.title)+(find?'&find='+encodeURIComponent(find):''),{signal});const d=await r.json();if(!r.ok)throw new Error(d.error||r.status);
+      read.add(a);
+      const n=cite(d.path,d.note);step.results=[n];step.title=d.note+(find?' · '+find:'');step.state='ok';
+      return `[${n}] ${d.note}${d.guessed?` (the closest note to "${args.note}")`:''}\n\n${d.text}`}
+    catch(e){if(signal.aborted)throw e;step.state='err';step.err=String(e.message||e);return `Error: ${step.err}`}}
+  const refuse=(c,webOn)=>webOn
+    ?"Web search is off for the rest of this answer because it has read the user's notes, so nothing from them leaves this computer. Answer from what you have; the user can ask for the web part in a new message."
+    :`There is no tool called ${c.name} here.`;
+
+  /* the switch in the + menu and the chip under the box, next to web search's */
+  const pop=document.getElementById('plusPop'),reason=pop&&pop.querySelector('[data-k=reason]');
+  const btn=document.createElement('button');btn.dataset.k='brain';btn.setAttribute('data-noi18n','');btn.hidden=true;
+  btn.innerHTML='<svg class="ic ic--sm"><use href="#i-file"/></svg><span></span><small></small>';
+  if(reason)reason.before(btn);
+  const chip=document.createElement('button');chip.className='webchip';chip.id='brainChip';chip.hidden=true;chip.setAttribute('data-noi18n','');
+  chip.innerHTML='<svg class="ic ic--xs"><use href="#i-file"/></svg><span></span><svg class="ic ic--xs webchip__x"><use href="#i-x"/></svg>';
+  const web=document.getElementById('webChip');if(web)web.after(chip);
+  function paint(){const ok=!!(S&&S.on);btn.hidden=!ok;btn.querySelector('span').textContent=tx('menu');btn.querySelector('small').textContent=tx(pref.on?'on':'off');
+    chip.hidden=!(ok&&pref.on);chip.querySelector('span').textContent=tx('menu');chip.title=tx('tip')}
+  const flip=v=>{pref.on=v;save();paint()};
+  if(pop)pop.addEventListener('click',e=>{const b=e.target.closest('button');if(b===btn)flip(!pref.on)});
+  chip.onclick=()=>flip(false);
+  let err='';
+  async function status(){try{const r=await fetch('/brain/status');S=r.ok?await r.json():null;err=r.ok?'':'HTTP '+r.status}catch(e){S=null;err=String(e&&e.message||e)}paint()}
+  status();setInterval(status,30000);
+  new MutationObserver(paint).observe(document.documentElement,{attributes:true,attributeFilter:['lang']});
+
+  return {state:()=>({status:S,on:pref.on,err}),on:()=>!!(S&&S.on&&pref.on),tools,system,pill:()=>tx('pill'),owns:n=>n==='note_search'||n==='note_read',run,used:a=>read.has(a),refuse};
 })();
 </script>
 </body>

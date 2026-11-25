@@ -10,6 +10,8 @@ Besides the proxy it answers /agents (ui/agents.py: a coding agent opened in a
 new terminal window, pointed at colibri) and /v1/responses (ui/responses_shim.py:
 the Responses API over the gateway's chat API, for agents that speak only that).
 /web/ is the chat's web search (ui/web.py: SearXNG with --searx, else DuckDuckGo).
+/brain/ is the chat's second brain (ui/brain.py: read-only search over the Markdown notes
+in the folder --brain names, such as an Obsidian vault; off without it).
 /models/ is the Models page (ui/models.py): in this process when the gateway is on
 this machine, else a models service on the engine's machine (--models-backend);
 with neither it answers 404 and the page says the feature is not available.
@@ -20,7 +22,7 @@ import argparse, http.client, json, os, sys, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import agents, responses_shim, web   # noqa: E402
+import agents, brain, responses_shim, web   # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROXIED = ("/v1/", "/health", "/profile", "/experts")
@@ -155,6 +157,24 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(502, {"error": "%s: %s" % (type(e).__name__, e)})
         return self._json(404, {"error": "no such route"})
 
+    def _brain(self, path):
+        """the chat's second brain: /brain/status, /brain/search?q=&n=, /brain/read?note=&find=&max="""
+        if not self._local_ok(False):
+            return self._json(403, {"error": "only from colibri's page on this machine"})
+        q = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(self.path).query))
+        try:
+            if path == "/brain/status":
+                return self._json(200, brain.status())
+            if path == "/brain/search":
+                return self._json(200, brain.search(q.get("q", ""), int(q.get("n", 4))))
+            if path == "/brain/read":
+                return self._json(200, brain.read(q.get("note", ""), q.get("find", ""), int(q.get("max", brain.MAX_READ))))
+        except ValueError as e:
+            return self._json(400, {"error": str(e)})
+        except Exception as e:   # noqa: BLE001 - a file the folder could not give, said to the page
+            return self._json(500, {"error": "%s: %s" % (type(e).__name__, e)})
+        return self._json(404, {"error": "no such route"})
+
     def _models(self):
         """the Models page: only for this page, like /agents (it downloads and restarts the server)"""
         post = self.command == "POST"
@@ -175,6 +195,8 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlparse(self.path).path
         if path.startswith("/web/") and self.command == "GET":
             self._web(path)
+        elif path.startswith("/brain/") and self.command == "GET":
+            self._brain(path)
         elif path == "/v1/responses" and self.command == "POST":
             responses_shim.serve(self, self.backend)   # Codex: the Responses API over colibri's chat API
         elif path == "/agents" or path.startswith("/agents/"):
@@ -209,8 +231,17 @@ def main():
                     help="where models are, for the Models page (default: colibri's own folder)")
     ap.add_argument("--searx", default=os.environ.get("COLIBRI_SEARX", ""),
                     help="a SearXNG instance for web search (default: DuckDuckGo's HTML results)")
+    ap.add_argument("--brain", default=os.environ.get("COLIBRI_BRAIN", ""),
+                    help="a folder of Markdown notes (an Obsidian vault) the chat can search and read")
     a = ap.parse_args()
     web.SEARX = a.searx
+    if a.brain:
+        root = os.path.realpath(os.path.expanduser(a.brain))
+        if os.path.isdir(root):
+            brain.ROOT = root
+            print("colibri UI: the chat's notes are in %s (%d notes)" % (root, brain.status()["notes"]), flush=True)
+        else:
+            print("colibri UI: --brain %s is not a folder: the chat's notes are off" % a.brain, file=sys.stderr)
     Handler.backend = urllib.parse.urlparse(a.backend)
     Handler.models_backend = urllib.parse.urlparse(a.models_backend) if a.models_backend else None
     Handler.port = a.port
